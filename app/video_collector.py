@@ -9,6 +9,12 @@ from urllib.parse import urlparse
 import aiohttp
 import asyncio
 from tqdm import tqdm
+import tempfile
+from fastapi import UploadFile
+import cv2
+import numpy as np
+from datetime import datetime
+from .models import VideoResult
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -94,6 +100,51 @@ class VideoCollector:
         # Print summary
         total_downloaded = len(self.downloaded_videos)
         logger.info(f"Video collection complete. Total videos: {total_downloaded}")
+
+    async def search_by_image(self, image: UploadFile) -> List[VideoResult]:
+        try:
+            # Save uploaded image to temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as temp_file:
+                content = await image.read()
+                temp_file.write(content)
+                temp_file_path = temp_file.name
+
+            # Read and process the image
+            img = cv2.imread(temp_file_path)
+            if img is None:
+                raise ValueError("Failed to read uploaded image")
+
+            # TODO: Implement actual image similarity search
+            # For now, return dummy results
+            results = [
+                VideoResult(
+                    video_id="dummy1",
+                    title="Sample Video 1",
+                    description="This is a sample video description",
+                    thumbnail_path="https://via.placeholder.com/320x180",
+                    similarity_score=0.95,
+                    published_at=datetime.now(),
+                    channel_title="Sample Channel"
+                ),
+                VideoResult(
+                    video_id="dummy2",
+                    title="Sample Video 2",
+                    description="Another sample video description",
+                    thumbnail_path="https://via.placeholder.com/320x180",
+                    similarity_score=0.85,
+                    published_at=datetime.now(),
+                    channel_title="Sample Channel"
+                )
+            ]
+
+            # Clean up temporary file
+            os.unlink(temp_file_path)
+
+            return results
+
+        except Exception as e:
+            print(f"Error processing image: {str(e)}")
+            raise
 
 def main():
     # Example usage

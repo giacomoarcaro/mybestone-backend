@@ -10,6 +10,8 @@ from tqdm import tqdm
 import yt_dlp
 import time
 from dotenv import load_dotenv
+from .models import VideoResult
+import asyncio
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -20,37 +22,28 @@ load_dotenv()
 
 class YouTubeCollector:
     def __init__(self):
-        self.api_key = os.getenv('YOUTUBE_API_KEY')
+        self.api_key = os.getenv("YOUTUBE_API_KEY")
         if not self.api_key:
-            raise ValueError("YouTube API key not found in environment variables")
-        
+            raise ValueError("YOUTUBE_API_KEY environment variable is not set")
         self.youtube = build('youtube', 'v3', developerKey=self.api_key)
-        
-        # Initialize directories
-        self.videos_dir = Path("videos")
-        self.videos_dir.mkdir(exist_ok=True)
-        
-        # Load already downloaded videos
-        self.downloaded_videos = self._load_downloaded_videos()
-        
-        # API quota tracking
-        self.daily_quota = 10000  # Free daily quota
-        self.quota_used = 0
-        self.last_reset = datetime.now()
-    
-    def _load_downloaded_videos(self) -> List[str]:
-        """Load list of already downloaded videos."""
-        downloaded_file = Path("downloaded_videos.json")
-        if downloaded_file.exists():
-            with open(downloaded_file, 'r') as f:
-                return json.load(f)
-        return []
-    
-    def _save_downloaded_videos(self):
-        """Save list of downloaded videos."""
-        with open("downloaded_videos.json", 'w') as f:
-            json.dump(self.downloaded_videos, f)
-    
+        self.data_dir = Path("data")
+        self.data_dir.mkdir(exist_ok=True)
+        self.videos_file = self.data_dir / "videos.json"
+        self.load_existing_videos()
+
+    def load_existing_videos(self):
+        """Load existing videos from JSON file"""
+        if self.videos_file.exists():
+            with open(self.videos_file, 'r') as f:
+                self.videos = json.load(f)
+        else:
+            self.videos = {}
+
+    def save_videos(self):
+        """Save videos to JSON file"""
+        with open(self.videos_file, 'w') as f:
+            json.dump(self.videos, f, indent=2)
+
     def _check_quota(self, cost: int) -> bool:
         """Check if we have enough quota for the operation."""
         # Reset quota if it's a new day
@@ -85,7 +78,7 @@ class YouTubeCollector:
             videos = []
             for item in search_response.get('items', []):
                 video_id = item['id']['videoId']
-                if video_id not in self.downloaded_videos:
+                if video_id not in self.videos:
                     videos.append({
                         'id': video_id,
                         'title': item['snippet']['title'],
@@ -146,48 +139,124 @@ class YouTubeCollector:
             logger.error(f"Error downloading video {video_id}: {str(e)}")
             return False
     
-    def collect_videos(self, query: str, max_videos: int = 100):
-        """Collect videos based on search query."""
+    async def collect_videos(self, max_videos: int = 10000):
+        """Collect videos from YouTube with rate limiting"""
         try:
-            logger.info(f"Starting video collection for query: {query}")
-            
-            # Search for videos
-            videos = self.search_videos(query, max_videos)
-            logger.info(f"Found {len(videos)} videos")
-            
-            # Download videos
-            for video in tqdm(videos, desc="Downloading videos"):
-                if len(self.downloaded_videos) >= max_videos:
+            # Keywords to search for
+            keywords = [
+                "cooking", "gaming", "music", "sports", "education",
+                "entertainment", "news", "tech", "travel", "fashion"
+            ]
+
+            videos_collected = 0
+            for keyword in keywords:
+                if videos_collected >= max_videos:
                     break
-                
-                video_id = video['id']
-                if video_id not in self.downloaded_videos:
-                    if self.download_video(video_id):
-                        self.downloaded_videos.append(video_id)
-                        self._save_downloaded_videos()
-                    
-                    # Add delay between downloads to respect rate limits
-                    time.sleep(1)
-            
-            logger.info(f"Total videos collected: {len(self.downloaded_videos)}")
-            
+
+                logger.info(f"Collecting videos for keyword: {keyword}")
+                next_page_token = None
+
+                while videos_collected < max_videos:
+                    try:
+                        # Search for videos
+                        search_response = self.youtube.search().list(
+                            q=keyword,
+                            part='id,snippet',
+                            maxResults=50,
+                            type='video',
+                            pageToken=next_page_token
+                        ).execute()
+
+                        # Get video details
+                        video_ids = [item['id']['videoId'] for item in search_response['items']]
+                        videos_response = self.youtube.videos().list(
+                            part='snippet,statistics,contentDetails',
+                            id=','.join(video_ids)
+                        ).execute()
+
+                        # Process videos
+                        for video in videos_response['items']:
+                            if video['id'] not in self.videos:
+                                self.videos[video['id']] = {
+                                    'title': video['snippet']['title'],
+                                    'description': video['snippet']['description'],
+                                    'thumbnail_path': video['snippet']['thumbnails']['high']['url'],
+                                    'published_at': video['snippet']['publishedAt'],
+                                    'channel_title': video['snippet']['channelTitle'],
+                                    'duration': video['contentDetails']['duration'],
+                                    'view_count': video['statistics'].get('viewCount', '0'),
+                                    'like_count': video['statistics'].get('likeCount', '0'),
+                                    'comment_count': video['statistics'].get('commentCount', '0')
+                                }
+                                videos_collected += 1
+                                logger.info(f"Collected {videos_collected} videos")
+
+                                # Save progress every 100 videos
+                                if videos_collected % 100 == 0:
+                                    self.save_videos()
+
+                        # Get next page token
+                        next_page_token = search_response.get('nextPageToken')
+                        if not next_page_token:
+                            break
+
+                        # Rate limiting
+                        time.sleep(1)  # Wait 1 second between requests
+
+                    except Exception as e:
+                        logger.error(f"Error collecting videos for keyword {keyword}: {str(e)}")
+                        time.sleep(5)  # Wait longer on error
+                        continue
+
+            # Final save
+            self.save_videos()
+            logger.info(f"Video collection complete. Total videos: {videos_collected}")
+
         except Exception as e:
-            logger.error(f"Error collecting videos: {str(e)}")
+            logger.error(f"Error in video collection: {str(e)}")
+            raise
+
+    async def search_by_text(self, query: str) -> List[VideoResult]:
+        try:
+            # Search for videos
+            search_response = self.youtube.search().list(
+                q=query,
+                part='id,snippet',
+                maxResults=10,
+                type='video'
+            ).execute()
+
+            # Get video details
+            video_ids = [item['id']['videoId'] for item in search_response['items']]
+            videos_response = self.youtube.videos().list(
+                part='snippet,statistics',
+                id=','.join(video_ids)
+            ).execute()
+
+            # Format results
+            results = []
+            for video in videos_response['items']:
+                result = VideoResult(
+                    video_id=video['id'],
+                    title=video['snippet']['title'],
+                    description=video['snippet']['description'],
+                    thumbnail_path=video['snippet']['thumbnails']['high']['url'],
+                    similarity_score=1.0,  # Text search doesn't have similarity scores
+                    published_at=datetime.fromisoformat(video['snippet']['publishedAt'].replace('Z', '+00:00')),
+                    channel_title=video['snippet']['channelTitle']
+                )
+                results.append(result)
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Error searching YouTube: {str(e)}")
+            raise
 
 def main():
     # Example usage
     collector = YouTubeCollector()
-    
-    # Example search queries
-    queries = [
-        "nature timelapse",
-        "city timelapse",
-        "landscape timelapse"
-    ]
-    
-    for query in queries:
-        collector.collect_videos(query, max_videos=50)
-        time.sleep(5)  # Delay between queries
+    asyncio.run(collector.collect_videos(max_videos=10000))
 
 if __name__ == "__main__":
     main() 
