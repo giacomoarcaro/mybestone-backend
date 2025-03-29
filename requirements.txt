@@ -1,0 +1,11 @@
+fastapi==0.109.2
+uvicorn==0.27.1
+python-multipart==0.0.9
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+pydantic==2.6.1
+numpy==1.26.4
+faiss-cpu==1.7.4
+opencv-python-headless==4.9.0.80
+Pillow==10.2.0
+open_clip-torch==2.24.0 
